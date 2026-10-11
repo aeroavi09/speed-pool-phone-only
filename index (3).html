@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#0b1210">
+<title>Speed Pool Shot Clock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: setup scrolls as one column; the game is a full-screen shot clock read from about 5 ft below the phone */
+:root{
+  --bg:#0b1210; --panel:#121c19; --line:#25352f; --ink:#eef3ef; --mute:#94a69d;
+  --felt:#35a56a; --amber:#f2b33d; --red:#ff5a47; --chalk:#7fb8e8;
+  --display:"Big Shoulders Display","Arial Narrow",Impact,sans-serif;
+  --body:"IBM Plex Sans",-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--body);-webkit-tap-highlight-color:transparent;
+  padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+main{max-width:720px;margin:0 auto;padding-inline:16px;padding-block:12px 40px;display:grid;gap:18px}
+.top{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+h1{font:900 34px/1 var(--display);letter-spacing:.02em;margin:0;text-transform:uppercase}
+h1 span{color:var(--felt)}
+h2{font:700 22px/1.1 var(--display);letter-spacing:.04em;text-transform:uppercase;margin:0}
+h3{font:600 13px/1.2 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:4px 0 0}
+p{margin:0;max-width:65ch}
+.mute{color:var(--mute)}
+.mono{font-variant-numeric:tabular-nums;color:var(--mute);font-size:13px}
+section{display:grid;gap:12px;padding-top:16px;border-top:1px solid var(--line)}
+.step{background:var(--panel);border-left:3px solid var(--amber);padding:10px 12px;border-radius:4px}
+.warn{border-left-color:var(--red)}
+button,select,input[type=text]{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 14px;min-height:44px}
+button{cursor:pointer;font-weight:500}
+button:active{transform:translateY(1px)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--chalk);outline-offset:2px}
+.primary{background:var(--felt);border-color:var(--felt);color:#06130c;font-weight:600}
+.big{font:800 22px/1 var(--display);letter-spacing:.06em;text-transform:uppercase;padding:16px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.row>button{flex:1 1 auto}
+label.field{display:grid;gap:6px;font-size:13px;color:var(--mute)}
+canvas{display:block;width:100%;max-width:100%;border-radius:6px;background:#000;touch-action:none}
+.sliders{display:grid;grid-template-columns:auto minmax(0,1fr) 3.5em;gap:10px 12px;align-items:center;font-size:14px}
+.sliders output{text-align:right;color:var(--mute);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--felt)}
+.check{display:flex;gap:8px;align-items:center;color:var(--mute);font-size:14px}
+.players{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.players input{width:100%;min-width:0;text-align:center;font-weight:600}
+
+/* Game face */
+#game{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;
+  padding:calc(env(safe-area-inset-top,0px) + 16px) 16px calc(env(safe-area-inset-bottom,0px) + 16px);user-select:none;-webkit-user-select:none}
+#game.flip .face{transform:rotate(180deg)}
+.face{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2vh;text-align:center;min-height:0}
+.gname{font:900 min(13vw,9vh)/1 var(--display);text-transform:uppercase;letter-spacing:.03em;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gtimer{font:900 min(100vw,62vh)/.8 var(--display);font-variant-numeric:tabular-nums;color:var(--felt);transition:color .15s}
+.gtimer.small{font-size:min(30vw,22vh)}
+.gstatus{font:500 min(5.2vw,3.4vh)/1.3 var(--body);color:var(--mute);max-width:30ch;min-height:2.6em}
+#mini{position:absolute;right:16px;top:calc(env(safe-area-inset-top,0px) + 16px);width:40%;max-width:240px;opacity:.9}
+.ctl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.ctl button{min-height:52px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main id="setup">
+  <div class="top"><h1>Speed <span>Pool</span></h1><span id="fps" class="mono"></span></div>
+
+  <section id="camCard" style="border-top:0;padding-top:0">
+    <p>This phone is the camera, the shot clock and the speaker. Tape it to the ceiling over the middle of the table with its long side along the table.</p>
+    <p class="mute">Front camera: tape it screen-down so players can read the clock. Back ultra-wide: sees more of the table, but the screen faces the ceiling, so you only hear the clock.</p>
+    <button id="btnCam" class="primary big">Turn on camera</button>
+    <label class="field" id="camRow" hidden>Camera<select id="camSel"></select></label>
+    <p id="camMsg" class="step" hidden></p>
+  </section>
+
+  <section id="calCard" hidden>
+    <h2>Calibrate</h2>
+    <p id="calMsg" class="step"></p>
+    <canvas id="raw"></canvas>
+    <h3>Top-down check · magenta = not felt</h3>
+    <canvas id="prev"></canvas>
+    <div class="sliders">
+      <span>Table</span><select id="table"><option value="78">7 ft</option><option value="88">8 ft</option><option value="100">9 ft</option></select><span></span>
+      <span>Lens</span><input type="range" id="k1" min="-0.3" max="0.15" step="0.01"><output id="k1V"></output>
+      <span>Felt hue</span><input type="range" id="hTol" min="8" max="40" step="1"><output id="hTolV"></output>
+      <span>Felt tol.</span><input type="range" id="tol" min="0.6" max="1.6" step="0.05"><output id="tolV"></output>
+      <span>Shot clock</span><input type="range" id="shotSec" min="5" max="20" step="1"><output id="shotSecV"></output>
+      <span>Stop time</span><input type="range" id="stillMs" min="500" max="2000" step="100"><output id="stillMsV"></output>
+    </div>
+    <div class="row">
+      <button id="btnCorners">Redo corners</button>
+      <button id="btnFelt">Re-pick felt</button>
+      <label class="check"><input type="checkbox" id="showMask" checked> Felt mask</label>
+    </div>
+  </section>
+
+  <section id="playCard" hidden>
+    <h2>Players</h2>
+    <div class="players"><input type="text" id="n0" maxlength="16" aria-label="Player 1 name"><input type="text" id="n1" maxlength="16" aria-label="Player 2 name"></div>
+    <div class="sliders"><span>Start delay</span><input type="range" id="delay" min="0" max="30" step="5"><output id="delayV"></output></div>
+    <p class="mute">The delay gives you time to climb down. On iPhone, turn the ringer switch on or the clock is silent.</p>
+    <button id="btnStart" class="primary big">Start game</button>
+  </section>
+</main>
+
+<div id="game" hidden>
+  <canvas id="mini" hidden></canvas>
+  <div class="face" id="face">
+    <div id="gName" class="gname"></div>
+    <div id="gTimer" class="gtimer">10</div>
+    <div id="gStatus" class="gstatus"></div>
+  </div>
+  <div id="ctl" class="ctl" hidden>
+    <button id="cPause">Pause</button>
+    <button id="cNext">Next player</button>
+    <button id="cFoul">Foul</button>
+    <button id="cReady">Ready</button>
+    <button id="cFlip">Flip screen</button>
+    <button id="cMini">Show camera</button>
+    <button id="cSetup" style="grid-column:1/-1">Back to setup</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+// ================= Core vision + game logic (no DOM; unit-testable) =================
+const W = 400, H = 200;                  // top-down working image, 2:1 like every pool table
+const DEF = {corners: null, k1: 0, tableIn: 88, felt: null, hTol: 20, tol: 1, shotSec: 10, stillMs: 1000, names: ['Player 1', 'Player 2']};
+let cfg = JSON.parse(JSON.stringify(DEF));
+let srcW = 0, srcH = 0, lut = null, ballAreaEma = 0, tracks = [], primed = false;
+const N = W * H;
+const warped = new Uint8ClampedArray(N * 4), mask = new Uint8Array(N), satA = new Uint8Array(N), valA = new Uint8Array(N);
+const lab = new Int32Array(N), stk = new Int32Array(N), pocketMask = new Uint8Array(N);
+const GW = 40, GH = 20, occT = new Float64Array(GW * GH);
+const hooks = {sound() {}, status() {}};
+
+function ballDiam() { return 2.25 / cfg.tableIn * W; }   // 2.25 in ball over playing length
+
+function solve(A, b) {
+  const n = b.length;
+  for (let i = 0; i < n; i++) {
+    let m = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[m][i])) m = r;
+    [A[i], A[m]] = [A[m], A[i]]; [b[i], b[m]] = [b[m], b[i]];
+    for (let r = i + 1; r < n; r++) {
+      const f = A[r][i] / A[i][i];
+      for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+      b[r] -= f * b[i];
+    }
+  }
+  const x = new Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = b[i];
+    for (let c = i + 1; c < n; c++) s -= A[i][c] * x[c];
+    x[i] = s / A[i][i];
+  }
+  return x;
+}
+
+function homography(s, d) {  // 3x3 (h8 = 1) mapping points s -> d
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = s[i], [u, v] = d[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  return [...solve(A, b), 1];
+}
+
+// Radial lens model r_d = r_u * (1 + k1 * r_u^2); invert by bisection on the monotonic range.
+function undistR(rd, k1) {
+  if (Math.abs(k1) < 1e-6) return rd;
+  let lo = 0, hi = k1 < 0 ? Math.min(rd * 3, 1 / Math.sqrt(-3 * k1)) : rd;
+  for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (m * (1 + k1 * m * m) < rd) lo = m; else hi = m; }
+  return (lo + hi) / 2;
+}
+
+function buildLut() {
+  const sw = srcW, sh = srcH, cx = sw / 2, cy = sh / 2, R = Math.hypot(cx, cy), k1 = cfg.k1;
+  const und = p => {
+    const x = p[0] * sw, y = p[1] * sh, dx = (x - cx) / R, dy = (y - cy) / R, rd = Math.hypot(dx, dy);
+    if (rd < 1e-9) return [x, y];
+    const s = undistR(rd, k1) / rd;
+    return [cx + dx * s * R, cy + dy * s * R];
+  };
+  let pts = cfg.corners.map(und);
+  const e01 = Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]);
+  const e12 = Math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1]);
+  if (e01 < e12) pts = [pts[1], pts[2], pts[3], pts[0]];   // first edge must be a long rail
+  const h = homography([[0, 0], [W, 0], [W, H], [0, H]], pts);
+  lut = new Int32Array(N);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const u = x + 0.5, v = y + 0.5, dn = h[6] * u + h[7] * v + 1;
+    let px = (h[0] * u + h[1] * v + h[2]) / dn, py = (h[3] * u + h[4] * v + h[5]) / dn;
+    const dx = (px - cx) / R, dy = (py - cy) / R, s = 1 + k1 * (dx * dx + dy * dy);
+    px = cx + dx * s * R; py = cy + dy * s * R;
+    const ix = Math.floor(px), iy = Math.floor(py);
+    lut[y * W + x] = (ix >= 0 && iy >= 0 && ix < sw && iy < sh) ? (iy * sw + ix) * 4 : -1;
+  }
+  const d = ballDiam(), r2 = (0.9 * d) ** 2, P = [[0, 0], [W / 2, 0], [W, 0], [0, H], [W / 2, H], [W, H]];
+  pocketMask.fill(0);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++)
+    for (const p of P) if ((x - p[0]) ** 2 + (y - p[1]) ** 2 < r2) { pocketMask[y * W + x] = 1; break; }
+  ballAreaEma = 0; tracks = []; primed = false; occT.fill(0);
+}
+
+function warp(img) {
+  for (let i = 0; i < N; i++) {
+    const j = lut[i], o = i << 2;
+    if (j < 0) { warped[o] = warped[o + 1] = warped[o + 2] = warped[o + 3] = 0; }
+    else { warped[o] = img[j]; warped[o + 1] = img[j + 1]; warped[o + 2] = img[j + 2]; warped[o + 3] = 255; }
+  }
+}
+
+function median(a) { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; }
+
+function detect() {
+  const f = cfg.felt; if (!f) return null;
+  const tol = cfg.tol, hT = cfg.hTol * tol;
+  for (let i = 0; i < N; i++) {
+    const o = i << 2, r = warped[o], g = warped[o + 1], b = warped[o + 2];
+    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b), dd = mx - mn;
+    let h = 0;
+    if (dd) { if (mx === r) h = ((g - b) / dd + 6) % 6; else if (mx === g) h = (b - r) / dd + 2; else h = (r - g) / dd + 4; h *= 60; }
+    const s = mx ? dd * 255 / mx : 0;
+    satA[i] = s; valA[i] = mx;
+    let dh = Math.abs(h - f.h); if (dh > 180) dh = 360 - dh;
+    const felt = dh < hT && s > f.s * (1 - 0.5 * tol) && s < f.s * (1 + 0.6 * tol) + 10 &&
+                 mx > f.v * (1 - 0.55 * tol) && mx < f.v * (1 + 0.6 * tol) + 10;
+    mask[i] = (warped[o + 3] && !felt && !pocketMask[i]) ? 1 : 0;
+  }
+  // Connected components (4-neighbour flood fill)
+  lab.fill(0);
+  let nl = 0; const comps = [];
+  for (let i = 0; i < N; i++) {
+    if (!mask[i] || lab[i]) continue;
+    nl++; let sp = 0; stk[sp++] = i; lab[i] = nl;
+    let area = 0, sx = 0, sy = 0, minx = W, maxx = 0, miny = H, maxy = 0, ss = 0, sv = 0, border = false;
+    while (sp) {
+      const p = stk[--sp], x = p % W, y = (p - x) / W;
+      area++; sx += x; sy += y; ss += satA[p]; sv += valA[p];
+      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) border = true;
+      if (x > 0 && mask[p - 1] && !lab[p - 1]) { lab[p - 1] = nl; stk[sp++] = p - 1; }
+      if (x < W - 1 && mask[p + 1] && !lab[p + 1]) { lab[p + 1] = nl; stk[sp++] = p + 1; }
+      if (y > 0 && mask[p - W] && !lab[p - W]) { lab[p - W] = nl; stk[sp++] = p - W; }
+      if (y < H - 1 && mask[p + W] && !lab[p + W]) { lab[p + W] = nl; stk[sp++] = p + W; }
+    }
+    comps.push({id: nl, area, x: sx / area, y: sy / area, minx, maxx, miny, maxy, bw: maxx - minx + 1, bh: maxy - miny + 1, s: ss / area, v: sv / area, border});
+  }
+  const d = ballDiam(), A1 = Math.PI * d * d / 4, Aref = ballAreaEma || A1;
+  const balls = [], occl = [];
+  for (const c of comps) {
+    if (c.area < 0.3 * Aref) continue;                              // noise, chalk, spot sticker
+    const fill = c.area / (c.bw * c.bh), asp = c.bw / c.bh;
+    if (c.border && c.area > 3 * Aref) { occl.push(c); continue; }  // arm, body, cue stick
+    if (c.area <= 1.7 * Aref && asp > 0.55 && asp < 1.8 && fill > 0.45) { c.n = 1; balls.push(c); continue; }
+    if (!c.border && c.area <= 20 * Aref && fill > 0.3) { c.n = Math.max(2, Math.round(c.area / Aref)); balls.push(c); }
+  }
+  const singles = balls.filter(b => b.n === 1 && b.area > 0.6 * A1 && b.area < 1.5 * A1).map(b => b.area);
+  if (singles.length >= 3) { const m = median(singles); ballAreaEma = ballAreaEma ? 0.95 * ballAreaEma + 0.05 * m : m; }
+  let cue = null, best = -1e9;
+  for (const b of balls) if (b.n === 1 && b.s < 75 && b.v > 140) { const sc = b.v - 1.5 * b.s; if (sc > best) { best = sc; cue = b; } }
+  if (cue) cue.cue = true;
+  const isOcc = new Uint8Array(nl + 1); for (const o of occl) isOcc[o.id] = 1;
+  const rr = d * 1.2;
+  for (const b of balls) {
+    b.nearOcc = false;
+    if (!occl.length) continue;
+    for (let k = 0; k < 8 && !b.nearOcc; k++) {
+      const a = k * Math.PI / 4, x = Math.round(b.x + rr * Math.cos(a)), y = Math.round(b.y + rr * Math.sin(a));
+      if (x >= 0 && y >= 0 && x < W && y < H && isOcc[lab[y * W + x]]) b.nearOcc = true;
+    }
+  }
+  return {balls, occl, cue, count: balls.reduce((a, b) => a + b.n, 0), d, isOcc};
+}
+
+// Returns the number of "something on the table moved" events in this frame.
+function updateActivity(det, now) {
+  const d = det.d;
+  if (det.occl.length) {
+    for (let i = 0; i < N; i++) {
+      const l = lab[i];
+      if (l && det.isOcc[l]) { const x = i % W, y = (i - x) / W; occT[((y / 10) | 0) * GW + ((x / 10) | 0)] = now; }
+    }
+  }
+  const recentOcc = (x, y) => {
+    const cx = (x / 10) | 0, cy = (y / 10) | 0;
+    for (let j = cy - 1; j <= cy + 1; j++) for (let i = cx - 1; i <= cx + 1; i++)
+      if (i >= 0 && j >= 0 && i < GW && j < GH && now - occT[j * GW + i] < 1500) return true;
+    return false;
+  };
+  const dets = det.balls.filter(b => !b.nearOcc);
+  const pairs = [];
+  for (let a = 0; a < dets.length; a++) for (let t = 0; t < tracks.length; t++) {
+    const dd = Math.hypot(dets[a].x - tracks[t].x, dets[a].y - tracks[t].y);
+    if (dd < 2 * d) pairs.push([dd, a, t]);
+  }
+  pairs.sort((p, q) => p[0] - q[0]);
+  const da = new Uint8Array(dets.length), ta = new Uint8Array(tracks.length);
+  let events = 0;
+  for (const [, a, t] of pairs) {
+    if (da[a] || ta[t]) continue;
+    da[a] = ta[t] = 1;
+    const tr = tracks[t], b = dets[a];
+    tr.x = b.x; tr.y = b.y; tr.seen = now;
+    if (Math.hypot(b.x - tr.ax, b.y - tr.ay) > 0.35 * d) { events++; tr.ax = b.x; tr.ay = b.y; }
+  }
+  for (let a = 0; a < dets.length; a++) if (!da[a]) {
+    const b = dets[a];
+    tracks.push({x: b.x, y: b.y, ax: b.x, ay: b.y, seen: now});
+    if (primed && !recentOcc(b.x, b.y)) events++;   // ball appeared somewhere nothing was: fast motion
+  }
+  tracks = tracks.filter(t => now - t.seen < 3000);
+  primed = true;
+  return events;
+}
+
+const G = {st: 'IDLE', player: 0, tEnd: 0, rem: 0, paused: false, auto: false, lastAct: 0, acts: [], aim: [], win: [],
+           preCount: 0, preCue: false, shotAt: 0, bihAt: 0, bihMoved: false, lastWhole: 99, lastClear: -1, last: null};
+
+function startAim(now, msg, snd) {
+  G.st = 'AIMING'; G.tEnd = now + cfg.shotSec * 1000; G.lastWhole = 99; G.aim = []; G.acts = []; G.paused = false;
+  hooks.status(msg || `${cfg.names[G.player]} to shoot`);
+  hooks.sound(snd || 'start');
+}
+function switchPlayer() { G.player = 1 - G.player; }
+function foul(now, why) {
+  hooks.sound(why === 'Time!' ? 'buzzer' : 'foul');
+  switchPlayer();
+  G.st = 'BIH'; G.bihAt = now; G.bihMoved = false; G.lastClear = -1;
+  hooks.status(`${why} Ball in hand: ${cfg.names[G.player]}. Place the cue ball. The clock restarts once it sits still.`);
+}
+function resolveShot(now) {
+  const w = G.win.length ? G.win : [G.last || {count: G.preCount, cue: G.preCue}];
+  const post = Math.max(...w.map(s => s.count)), cue = w.some(s => s.cue), potted = G.preCount - post;
+  G.lastClear = -1;
+  if (G.preCue && !cue) { foul(now, 'Scratch!'); return; }
+  if (potted > 0) { startAim(now, `${cfg.names[G.player]} potted ${potted}. Shoot again!`, 'pocket'); return; }
+  switchPlayer();
+  startAim(now);
+}
+function pause(now, auto) {
+  if (G.st === 'IDLE' || G.paused) return;
+  G.paused = true; G.auto = !!auto;
+  if (G.st === 'AIMING') G.rem = G.tEnd - now;
+  hooks.status(auto ? 'Camera stalled. Paused.' : 'Paused');
+}
+function resume(now) {
+  if (!G.paused) return;
+  G.paused = false; G.auto = false; G.lastAct = now;
+  if (G.st === 'AIMING') { G.tEnd = now + G.rem; hooks.status(`${cfg.names[G.player]} to shoot`); }
+  else hooks.status('Resumed');
+}
+function onDetections(det, now) {
+  const ev = updateActivity(det, now);
+  if (ev) { G.lastAct = now; G.acts.push(now); }
+  G.acts = G.acts.filter(t => now - t < 500);
+  const still = now - G.lastAct >= cfg.stillMs;
+  const snap = {t: now, count: det.count, cue: !!det.cue};
+  G.last = snap;
+  if (still && !det.occl.length) G.lastClear = Math.max(G.lastClear, det.count);
+  if (G.paused || G.st === 'IDLE') return;
+  if (G.st === 'AIMING') {
+    G.aim.push(snap); G.aim = G.aim.filter(s => now - s.t < 1500);
+    if (G.acts.length >= 2) {                             // two motion events within 0.5 s = shot taken
+      const pre = G.aim.filter(s => now - s.t > 500), base = pre.length ? pre : G.aim;
+      G.preCount = Math.max(G.lastClear, ...base.map(s => s.count));
+      G.preCue = base.some(s => s.cue);
+      G.st = 'SHOT'; G.shotAt = now; G.win = [];
+      hooks.sound('shot'); hooks.status('Shot! Waiting for the balls to stop…');
+    }
+  } else if (G.st === 'SHOT') {
+    if (ev) G.win = []; else G.win.push(snap);
+    if ((still && now - G.shotAt > 800 && G.win.length) || now - G.shotAt > 30000) resolveShot(now);
+  } else if (G.st === 'BIH') {
+    if (ev && now - G.bihAt > 300) G.bihMoved = true;
+    if (G.bihMoved && now - G.lastAct > 1500 && !det.occl.length && det.cue) startAim(now);
+  }
+}
+function timeCheck(now) {
+  if (G.st === 'AIMING' && !G.paused && now > G.tEnd + 300) foul(now, 'Time!');
+}
+
+if (typeof module !== 'undefined') module.exports = {
+  W, H, cfg, G, hooks, buildLut, warp, detect, updateActivity, onDetections, timeCheck, startAim, homography, undistR,
+  setSrc(w, h) { srcW = w; srcH = h; }, getLut: () => lut, warped, mask
+};
+
+// ================= Phone UI: camera in, shot clock out =================
+function initUI() {
+  const $ = id => document.getElementById(id);
+  Object.assign(cfg, {aspect: 0, camId: '', delay: 15});
+  try { const s = localStorage.getItem('sp_phone_cfg'); if (s) Object.assign(cfg, JSON.parse(s)); } catch (e) {}
+  const save = () => { try { localStorage.setItem('sp_phone_cfg', JSON.stringify(cfg)); } catch (e) {} };
+
+  const video = document.createElement('video');
+  video.muted = true; video.playsInline = true; video.setAttribute('playsinline', ''); video.autoplay = true;
+  const proc = document.createElement('canvas'), pctx = proc.getContext('2d', {willReadFrequently: true});
+  const wc = document.createElement('canvas'); wc.width = W; wc.height = H;
+  const wctx = wc.getContext('2d'), wimg = wctx.createImageData(W, H);
+  const raw = $('raw'), rctx = raw.getContext('2d'), prev = $('prev'), prctx = prev.getContext('2d'), mini = $('mini'), mctx = mini.getContext('2d');
+  prev.width = mini.width = W * 2; prev.height = mini.height = H * 2;
+
+  let stream = null, loopOn = false, lastProc = 0, lastFrame = 0, frames = 0, fpsT = performance.now();
+  let calStep = cfg.corners ? (cfg.felt ? 5 : 4) : 0, newCorners = [], inGame = false, countEnd = 0, lastCount = -1;
+  let ac = null, wl = null, ctlTimer = 0;
+
+  // ---- sound ----
+  function audioInit() {
+    if (!ac) { const C = window.AudioContext || window.webkitAudioContext; if (C) ac = new C(); }
+    if (ac && ac.state === 'suspended') ac.resume();
+  }
+  function tone(f, dur, type, vol, when) {
+    if (!ac) return;
+    const t = ac.currentTime + (when || 0), o = ac.createOscillator(), g = ac.createGain();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol || 0.4, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(ac.destination); o.start(t); o.stop(t + dur + 0.02);
+  }
+  const SND = {
+    tick: () => tone(1000, 0.06, 'square', 0.25),
+    warn: () => tone(1500, 0.18, 'square', 0.45),
+    buzzer: () => { tone(180, 1.0, 'sawtooth', 0.6); tone(191, 1.0, 'sawtooth', 0.5); },
+    pocket: () => { tone(880, 0.12, 'sine', 0.5); tone(1320, 0.25, 'sine', 0.5, 0.12); },
+    foul: () => { tone(400, 0.22, 'triangle', 0.6); tone(280, 0.45, 'triangle', 0.6, 0.22); },
+    shot: () => tone(600, 0.07, 'sine', 0.3),
+    start: () => { tone(660, 0.12, 'sine', 0.45); tone(990, 0.18, 'sine', 0.45, 0.12); }
+  };
+  hooks.sound = n => { if (SND[n]) SND[n](); };
+  hooks.status = t => { $('gStatus').textContent = t; };
+
+  // ---- camera ----
+  function camMsg(t, bad) { const m = $('camMsg'); m.hidden = !t; m.textContent = t || ''; m.classList.toggle('warn', !!bad); }
+  async function startCam(deviceId) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      camMsg('This browser blocks the camera here. Open the page from an https:// address in Safari or Chrome.', true); return false;
+    }
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const v = {width: {ideal: 1280}, height: {ideal: 720}, frameRate: {ideal: 30}};
+    if (deviceId) v.deviceId = {exact: deviceId}; else v.facingMode = {ideal: 'environment'};
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({video: v, audio: false});
+    } catch (e) {
+      if (deviceId) return startCam('');
+      camMsg(e && e.name === 'NotAllowedError'
+        ? 'Camera access was blocked. Allow the camera for this site in the browser settings, then reload.'
+        : 'Could not start the camera (' + (e && e.name || 'error') + ').', true);
+      return false;
+    }
+    video.srcObject = stream;
+    try { await video.play(); } catch (e) {}
+    const tr = stream.getVideoTracks()[0], cur = (tr.getSettings && tr.getSettings().deviceId) || '';
+    let devs = [];
+    try { devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch (e) {}
+    const sel = $('camSel'); sel.textContent = '';
+    devs.forEach((d, i) => { const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || ('Camera ' + (i + 1)); sel.appendChild(o); });
+    sel.value = cur; $('camRow').hidden = devs.length < 2;
+    // First run: prefer an ultra-wide lens when the browser names one.
+    if (!deviceId && !cfg.camId) {
+      const uw = devs.find(d => /ultra/i.test(d.label));
+      if (uw && uw.deviceId !== cur) { cfg.camId = uw.deviceId; save(); return startCam(uw.deviceId); }
+    }
+    if (cur && cur !== cfg.camId) { if (cfg.camId) { cfg.corners = null; calStep = 0; newCorners = []; } cfg.camId = cur; save(); }
+    camMsg('');
+    $('calCard').hidden = false; $('playCard').hidden = false; $('btnCam').hidden = true;
+    calMsgUpdate();
+    if (!loopOn) { loopOn = true; schedule(); }
+    return true;
+  }
+  $('btnCam').onclick = async () => { audioInit(); if (!(await startCam(cfg.camId))) return; };
+  $('camSel').onchange = e => { cfg.corners = null; calStep = 0; newCorners = []; cfg.camId = e.target.value; save(); startCam(e.target.value); };
+
+  // ---- frame loop ----
+  function schedule() {
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(tick); else setTimeout(tick, 33);
+  }
+  function tick() {
+    const now = performance.now();
+    if (video.readyState >= 2 && video.videoWidth && now - lastProc >= 45) { lastProc = now; processFrame(now); }
+    schedule();
+  }
+  function processFrame(now) {
+    const vw = video.videoWidth, vh = video.videoHeight, sc = Math.min(1, 640 / Math.max(vw, vh));
+    const w = Math.round(vw * sc), h = Math.round(vh * sc);
+    if (w !== srcW || h !== srcH) { srcW = w; srcH = h; proc.width = w; proc.height = h; raw.width = w; raw.height = h; lut = null; calMsgUpdate(); }
+    pctx.drawImage(video, 0, 0, w, h);
+    lastFrame = now; frames++;
+    if (now - fpsT > 1000) { $('fps').textContent = Math.round(frames * 1000 / (now - fpsT)) + ' fps · ' + w + '×' + h; frames = 0; fpsT = now; }
+    if (!inGame) drawRaw();
+    if (!cfg.corners || aspectWrong()) return;
+    if (!lut) buildLut();
+    warp(pctx.getImageData(0, 0, w, h).data);
+    const det = cfg.felt ? detect() : null;
+    if (det) { onDetections(det, now); lastCount = det.count; }
+    if (!inGame) drawWarped(prctx, det, true, $('showMask').checked);
+    else if (!mini.hidden) drawWarped(mctx, det, true, false);
+  }
+  function aspectWrong() { return cfg.aspect && srcH && Math.abs(srcW / srcH - cfg.aspect) > 0.05; }
+
+  function drawWarped(ctx, det, overlay, showMask) {
+    wimg.data.set(warped);
+    if (showMask && det) for (let i = 0; i < N; i++) if (mask[i]) { const o = i << 2; wimg.data[o] = 255; wimg.data[o + 1] = 0; wimg.data[o + 2] = 255; }
+    wctx.putImageData(wimg, 0, 0);
+    ctx.drawImage(wc, 0, 0, ctx.canvas.width, ctx.canvas.height);
+    if (!overlay || !det) return;
+    const s = ctx.canvas.width / W;
+    ctx.lineWidth = 3; ctx.font = '600 22px system-ui, sans-serif';
+    for (const b of det.balls) {
+      ctx.strokeStyle = b.cue ? '#ffffff' : b.nearOcc ? '#94a69d' : '#f2b33d';
+      ctx.beginPath(); ctx.arc(b.x * s, b.y * s, (det.d / 2) * Math.sqrt(b.n) * s + 3, 0, 2 * Math.PI); ctx.stroke();
+      if (b.n > 1) { ctx.fillStyle = '#f2b33d'; ctx.fillText('×' + b.n, b.x * s + 8, b.y * s - 8); }
+    }
+    ctx.strokeStyle = '#ff5a47';
+    for (const o of det.occl) ctx.strokeRect(o.minx * s, o.miny * s, o.bw * s, o.bh * s);
+    ctx.fillStyle = '#ffffff'; ctx.fillText('balls ' + det.count + (det.cue ? '' : ' · no cue ball'), 10, 28);
+  }
+  function drawRaw() {
+    rctx.drawImage(proc, 0, 0);
+    const pts = calStep < 4 ? newCorners : (cfg.corners || []);
+    rctx.lineWidth = Math.max(2, srcW / 250); rctx.strokeStyle = '#35a56a'; rctx.fillStyle = '#35a56a';
+    rctx.font = `700 ${Math.round(Math.max(srcW, srcH) / 22)}px system-ui, sans-serif`;
+    rctx.beginPath();
+    pts.forEach((p, i) => { const x = p[0] * srcW, y = p[1] * srcH; i ? rctx.lineTo(x, y) : rctx.moveTo(x, y); });
+    if (pts.length === 4) rctx.closePath();
+    rctx.stroke();
+    pts.forEach((p, i) => { const x = p[0] * srcW, y = p[1] * srcH; rctx.beginPath(); rctx.arc(x, y, Math.max(srcW, srcH) / 70, 0, 7); rctx.fill(); rctx.fillText(String(i + 1), x + 10, y - 10); });
+  }
+
+  // ---- calibration ----
+  function calMsgUpdate() {
+    const m = $('calMsg');
+    m.classList.remove('warn');
+    if (aspectWrong()) { m.textContent = 'The camera picture turned since you calibrated. Lock screen rotation, then tap Redo corners.'; m.classList.add('warn'); return; }
+    m.textContent = calStep < 4
+      ? `Tap the ${4 - newCorners.length} remaining corner${newCorners.length === 3 ? '' : 's'} of the playing surface, where the cushion noses meet, going around the table in order.`
+      : calStep === 4 ? 'Tap an empty patch of felt.'
+      : 'Drag Lens until the rails look straight below, then Felt tol. until every ball is solid magenta and the felt is clear.';
+  }
+  raw.addEventListener('pointerdown', e => {
+    if (!srcW) return;
+    const r = raw.getBoundingClientRect(), x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    if (calStep < 4) {
+      newCorners.push([x, y]);
+      if (newCorners.length === 4) { cfg.corners = newCorners.slice(); cfg.aspect = srcW / srcH; lut = null; calStep = cfg.felt ? 5 : 4; save(); }
+    } else if (calStep === 4) {
+      const px = Math.max(3, Math.min(srcW - 4, Math.round(x * srcW))), py = Math.max(3, Math.min(srcH - 4, Math.round(y * srcH)));
+      const d = pctx.getImageData(px - 3, py - 3, 7, 7).data;
+      let r0 = 0, g0 = 0, b0 = 0; for (let i = 0; i < d.length; i += 4) { r0 += d[i]; g0 += d[i + 1]; b0 += d[i + 2]; }
+      const n = d.length / 4; r0 /= n; g0 /= n; b0 /= n;
+      const mx = Math.max(r0, g0, b0), mn = Math.min(r0, g0, b0), dd = mx - mn;
+      let h = 0; if (dd) { if (mx === r0) h = ((g0 - b0) / dd + 6) % 6; else if (mx === g0) h = (b0 - r0) / dd + 2; else h = (r0 - g0) / dd + 4; h *= 60; }
+      cfg.felt = {h, s: mx ? dd * 255 / mx : 0, v: mx}; calStep = 5; save();
+    }
+    calMsgUpdate();
+  });
+  $('btnCorners').onclick = () => { newCorners = []; calStep = 0; cfg.aspect = 0; calMsgUpdate(); };
+  $('btnFelt').onclick = () => { if (cfg.corners) { calStep = 4; calMsgUpdate(); } };
+
+  const bind = (id, key, after) => {
+    const el = $(id), out = $(id + 'V');
+    el.value = cfg[key];
+    const upd = () => { if (out) out.textContent = id === 'delay' ? el.value + ' s' : el.value; };
+    upd();
+    el.addEventListener('input', () => { cfg[key] = parseFloat(el.value); upd(); save(); if (after) after(); });
+  };
+  bind('table', 'tableIn', () => { lut = null; });
+  bind('k1', 'k1', () => { lut = null; });
+  bind('hTol', 'hTol'); bind('tol', 'tol'); bind('shotSec', 'shotSec'); bind('stillMs', 'stillMs'); bind('delay', 'delay');
+  [0, 1].forEach(i => {
+    const el = $('n' + i); el.value = cfg.names[i];
+    el.addEventListener('input', () => { cfg.names[i] = el.value || ('Player ' + (i + 1)); save(); });
+  });
+
+  // ---- game ----
+  async function lockOn() { try { if ('wakeLock' in navigator) { wl = await navigator.wakeLock.request('screen'); } } catch (e) {} }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && inGame) lockOn(); });
+
+  $('btnStart').onclick = () => {
+    audioInit();
+    if (!cfg.corners || !cfg.felt || aspectWrong()) { calMsgUpdate(); $('calMsg').classList.add('warn'); $('calMsg').scrollIntoView({block: 'center'}); return; }
+    inGame = true; $('setup').hidden = true; $('game').hidden = false;
+    lockOn();
+    const fs = document.documentElement.requestFullscreen; if (fs) document.documentElement.requestFullscreen().catch(() => {});
+    G.st = 'IDLE'; G.paused = false; G.player = 0; G.lastClear = -1;
+    countEnd = performance.now() + cfg.delay * 1000;
+    hooks.status('Climb down. The clock starts on its own.');
+  };
+  function showCtl() {
+    const c = $('ctl'); c.hidden = false; clearTimeout(ctlTimer);
+    ctlTimer = setTimeout(() => { c.hidden = true; }, 8000);
+  }
+  $('face').addEventListener('click', () => { audioInit(); showCtl(); });
+  $('cPause').onclick = () => { const now = performance.now(); if (countEnd) { countEnd = 0; G.st = 'IDLE'; startAim(now); } else if (G.paused) resume(now); else pause(now); showCtl(); };
+  $('cNext').onclick = () => { if (G.st === 'IDLE') return; G.player = 1 - G.player; startAim(performance.now()); showCtl(); };
+  $('cFoul').onclick = () => { if (G.st !== 'IDLE') foul(performance.now(), 'Foul.'); showCtl(); };
+  $('cReady').onclick = () => { if (G.st === 'BIH') startAim(performance.now()); showCtl(); };
+  $('cFlip').onclick = () => { $('game').classList.toggle('flip'); showCtl(); };
+  $('cMini').onclick = () => { mini.hidden = !mini.hidden; $('cMini').textContent = mini.hidden ? 'Show camera' : 'Hide camera'; showCtl(); };
+  $('cSetup').onclick = () => {
+    inGame = false; countEnd = 0; G.st = 'IDLE'; G.paused = false;
+    $('game').hidden = true; $('setup').hidden = false; $('ctl').hidden = true;
+    if (wl) { wl.release().catch(() => {}); wl = null; }
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  };
+
+  function loop() {
+    const now = performance.now();
+    if (inGame) {
+      if (countEnd && now >= countEnd) { countEnd = 0; startAim(now); }
+      if (G.st !== 'IDLE' && !G.paused && lastFrame && now - lastFrame > 1500) pause(now, true);
+      if (G.auto && now - lastFrame < 500) resume(now);
+      timeCheck(now);
+      const t = $('gTimer'), nm = $('gName');
+      nm.textContent = cfg.names[G.player] || ('Player ' + (G.player + 1));
+      t.classList.remove('small');
+      if (countEnd) {
+        t.textContent = Math.ceil((countEnd - now) / 1000); t.style.color = 'var(--mute)'; nm.textContent = 'Starting';
+      } else if (G.st === 'AIMING') {
+        const rem = (G.paused ? G.rem : G.tEnd - now) / 1000, whole = Math.max(0, Math.ceil(rem));
+        if (!G.paused && whole !== G.lastWhole && whole >= 1) {
+          G.lastWhole = whole;
+          if (whole <= 3) hooks.sound('warn'); else if (whole <= 5) hooks.sound('tick');
+        }
+        t.textContent = whole;
+        t.style.color = G.paused ? 'var(--mute)' : rem > 5 ? 'var(--felt)' : rem > 3 ? 'var(--amber)' : 'var(--red)';
+      } else {
+        t.classList.add('small');
+        t.textContent = G.st === 'SHOT' ? 'Rolling' : G.st === 'BIH' ? 'Ball in hand' : '—';
+        t.style.color = G.st === 'BIH' ? 'var(--amber)' : 'var(--mute)';
+      }
+      $('cPause').textContent = countEnd ? 'Start now' : G.paused ? 'Resume' : 'Pause';
+      $('cReady').disabled = G.st !== 'BIH';
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  window.__sp = {video, get lastCount() { return lastCount; }};
+}
+
+if (typeof window !== 'undefined' && window.document) initUI();
+</script>
+</body>
+</html>
