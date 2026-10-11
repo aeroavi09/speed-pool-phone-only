@@ -104,15 +104,14 @@ input[type=range]{width:100%;accent-color:var(--felt)}
   <section id="playCard" hidden>
     <h2>Game</h2>
     <div class="sliders">
-      <span>Players</span><input type="range" id="players" min="2" max="6" step="1"><output id="playersV"></output>
       <span>Start delay</span><input type="range" id="delay" min="0" max="30" step="5"><output id="delayV"></output>
     </div>
     <ol class="rules">
-      <li>Player 1 shoots first. Each player has 10 s to shoot.</li>
-      <li>Hitting the ball ends your turn, whether or not anything drops.</li>
-      <li>The next player's clock starts when every ball has stopped.</li>
-      <li>Scratch: the clock starts when the balls stop, or as soon as someone reaches into the pocket for the cue ball.</li>
-      <li>Run out of time: buzzer, and the next player's clock starts.</li>
+      <li>Play normal pool. You keep track of whose shot it is.</li>
+      <li>The clock starts as soon as every ball has stopped.</li>
+      <li>It stops the moment any ball starts rolling.</li>
+      <li>After a scratch, it starts when the balls stop or someone reaches into the pocket for the cue ball.</li>
+      <li>At 0 the buzzer sounds, then the clock starts again for the next shot.</li>
     </ol>
     <p class="mute">The delay gives you time to climb down. On iPhone, turn the ringer switch on or the clock is silent.</p>
     <button id="btnStart" class="primary big">Start game</button>
@@ -128,11 +127,10 @@ input[type=range]{width:100%;accent-color:var(--felt)}
   </div>
   <div id="ctl" class="ctl" hidden>
     <button id="cPause">Pause</button>
-    <button id="cNext">Next player</button>
     <button id="cRestart">Restart clock</button>
     <button id="cFlip">Flip screen</button>
     <button id="cMini">Show camera</button>
-    <button id="cSetup" style="grid-column:1/-1">Back to setup</button>
+    <button id="cSetup">Back to setup</button>
   </div>
 </div>
 
@@ -140,7 +138,7 @@ input[type=range]{width:100%;accent-color:var(--felt)}
 'use strict';
 // ================= Core vision + game logic (no DOM; unit-testable) =================
 const W = 600, H = 300;                  // top-down working image, 2:1 like every pool table
-const DEF = {corners: null, k1: 0, tableIn: 88, felt: null, hTol: 20, tol: 1, shotSec: 10, stillMs: 1000, players: 2, aspect: 0, camId: '', delay: 15};
+const DEF = {corners: null, k1: 0, tableIn: 88, felt: null, hTol: 20, tol: 1, shotSec: 10, stillMs: 1000, aspect: 0, camId: '', delay: 15};
 let cfg = JSON.parse(JSON.stringify(DEF));
 let srcW = 0, srcH = 0, lut = null, ballAreaEma = 0, tracks = [], primed = false;
 const N = W * H, GW = W / 10, GH = H / 10;
@@ -148,7 +146,7 @@ const warped = new Uint8ClampedArray(N * 4), mask = new Uint8Array(N), satA = ne
 const lab = new Int32Array(N), stk = new Int32Array(N), pocketMask = new Uint8Array(N), pocketNear = new Uint8Array(N), dt = new Uint16Array(N);
 const occT = new Float64Array(GW * GH), pocketId = new Int8Array(N), pocketBase = new Float64Array(6).fill(-1);
 const hooks = {sound() {}, status() {}};
-const cueT = {prev: null, rest: null, moving: 0, stillN: 0};
+let rest = [], prevCands = [];
 
 function ballDiam() { return 2.25 / cfg.tableIn * W; }   // 2.25 in ball over playing length
 
@@ -193,7 +191,7 @@ function undistR(rd, k1) {
 
 function resetTracking() {
   ballAreaEma = 0; tracks = []; primed = false; occT.fill(0);
-  cueT.prev = cueT.rest = null; cueT.moving = cueT.stillN = 0;
+  rest = []; prevCands = [];
 }
 
 function buildLut() {
@@ -349,8 +347,7 @@ function detect() {
   return {balls, occl, cue, count: balls.reduce((a, b) => a + b.n, 0), d, isOcc, pocketReach};
 }
 
-// Motion this frame: `events` = something on the table moved (used to decide the balls have stopped);
-// `hit` = a ball is genuinely rolling (two frames in a row of travel, clear of anyone's body).
+// `events` = something on the table moved this frame; used to decide that every ball has stopped.
 function updateMotion(det, now) {
   const d = det.d;
   if (det.occl.length) {
@@ -373,12 +370,11 @@ function updateMotion(det, now) {
   }
   pairs.sort((p, q) => p[0] - q[0]);
   const da = new Uint8Array(dets.length), ta = new Uint8Array(tracks.length);
-  let events = 0, hit = false;
+  let events = 0;
   for (const [step, a, t] of pairs) {
     if (da[a] || ta[t]) continue;
     da[a] = ta[t] = 1;
     const tr = tracks[t], b = dets[a];
-    if (b.n === 1 && !b.cue && step > 0.2 * d) { if (++tr.mv >= 2) hit = true; } else tr.mv = 0;
     tr.x = b.x; tr.y = b.y; tr.seen = now;
     if (Math.hypot(b.x - tr.ax, b.y - tr.ay) > 0.35 * d) { events++; tr.ax = b.x; tr.ay = b.y; }
   }
@@ -390,51 +386,81 @@ function updateMotion(det, now) {
   tracks = tracks.filter(t => now - t.seen < 3000);
   primed = true;
 
-  // Cue ball: a stroke moves it frame after frame; aiming, a bridge hand or a placed ball does not.
-  const c = det.cue;
-  if (c) {
-    if (cueT.prev) {
-      const step = Math.hypot(c.x - cueT.prev.x, c.y - cueT.prev.y);
-      if (!c.nearOcc && step > 0.2 * d) cueT.moving++; else cueT.moving = 0;
-      if (step < 0.12 * d) cueT.stillN++; else cueT.stillN = 0;
-    }
-    if (!cueT.rest || (cueT.stillN >= 4 && !c.nearOcc)) cueT.rest = {x: c.x, y: c.y};
-    if (cueT.moving >= 2 && Math.hypot(c.x - cueT.rest.x, c.y - cueT.rest.y) > 0.8 * d) hit = true;
-    cueT.prev = {x: c.x, y: c.y};
-  } else cueT.moving = 0;
-  return {events, hit};
+  return events;
 }
 
-const G = {st: 'IDLE', player: 0, turn: 1, tEnd: 0, rem: 0, paused: false, auto: false, lastAct: 0, shotAt: 0, handoffEnd: 0,
-           cueGone: 0, scratch: false, lastWhole: 99};
+// ---- Shot detection while the clock runs ----
+// When the clock starts, every ball's resting spot is remembered. A shot is taken when
+//  (a) a remembered spot turns into bare cloth without a hand or cue having been over it, or
+//  (b) a ball shows up away from every remembered spot and is in a different place on the next frame (rolling).
+// A spot that was covered and then turns to cloth is just forgotten: the ball was either lifted by hand
+// (not a shot) or struck, in which case it is seen rolling by (b). A ball placed by hand sits still.
+function snapshot(det) {
+  rest = det.balls.map(b => ({x: b.x, y: b.y, miss: 0, cov: false}));
+  prevCands = [];
+}
+function spotState(x, y, d, isOcc) {
+  const rr = 0.3 * d; let occ = false;
+  for (let k = 0; k < 9; k++) {
+    const a = k * Math.PI / 4, px = Math.round(x + (k ? rr * Math.cos(a) : 0)), py = Math.round(y + (k ? rr * Math.sin(a) : 0));
+    if (px < 0 || py < 0 || px >= W || py >= H) continue;
+    const l = lab[py * W + px];
+    if (l) { if (isOcc[l]) occ = true; else return 'ball'; }
+  }
+  return occ ? 'occ' : 'cloth';
+}
+function shotTaken(det, now) {
+  const d = det.d; let hit = false;
+  for (const s of rest) {
+    const st = spotState(s.x, s.y, d, det.isOcc);
+    if (st === 'occ') { s.cov = true; s.miss = 0; }
+    else if (st === 'cloth') { if (s.cov) s.gone = true; else if (++s.miss >= 2) hit = true; }
+    else { s.miss = 0; s.cov = false; }
+  }
+  rest = rest.filter(s => !s.gone);
+  const cands = det.balls.filter(b => !b.nearOcc && !rest.some(s => Math.hypot(b.x - s.x, b.y - s.y) < 0.6 * d));
+  for (const c of cands) {
+    let best = Infinity, bp = null;
+    for (const p of prevCands) { const q = Math.hypot(c.x - p.x, c.y - p.y); if (q < best) { best = q; bp = p; } }
+    if (bp && best > 0.35 * d && best < 25 * d) hit = true;
+    c.still = bp && best < 0.2 * d ? (bp.still || 0) + 1 : 0;
+    if (c.still >= 8) rest.push({x: c.x, y: c.y, miss: 0, cov: false});   // a ball someone placed, now settled
+  }
+  prevCands = cands.filter(c => c.still < 8);
+  return hit;
+}
 
-function startTurn(now, player, msg) {
-  G.st = 'AIMING'; G.player = player; G.tEnd = now + cfg.shotSec * 1000; G.lastWhole = 99; G.paused = false;
-  hooks.status(msg || `Turn ${G.turn}`);
+const G = {st: 'IDLE', tEnd: 0, rem: 0, paused: false, auto: false, lastAct: 0, shotAt: 0, timeoutEnd: 0,
+           cueGone: 0, scratch: false, lastWhole: 99, needSnap: false, snapWhenStill: false};
+
+function startClock(now, msg) {
+  G.st = 'CLOCK'; G.tEnd = now + cfg.shotSec * 1000; G.lastWhole = 99; G.paused = false; G.needSnap = true; G.snapWhenStill = false;
+  hooks.status(msg || 'Shoot');
   hooks.sound('start');
 }
-function nextPlayer() { return (G.player + 1) % Math.max(2, cfg.players | 0); }
-function passTurn(now, msg) { G.turn++; startTurn(now, nextPlayer(), msg); }
 function pause(now, auto) {
   if (G.st === 'IDLE' || G.paused) return;
   G.paused = true; G.auto = !!auto;
-  if (G.st === 'AIMING') G.rem = G.tEnd - now;
+  if (G.st === 'CLOCK') G.rem = G.tEnd - now;
   hooks.status(auto ? 'Camera stalled. Paused.' : 'Paused');
 }
 function resume(now) {
   if (!G.paused) return;
   G.paused = false; G.auto = false; G.lastAct = now;
-  if (G.st === 'AIMING') G.tEnd = now + G.rem;
-  hooks.status(`Turn ${G.turn}`);
+  if (G.st === 'CLOCK') { G.tEnd = now + G.rem; G.needSnap = true; }
+  hooks.status(G.st === 'ROLLING' ? 'Waiting for the balls to stop' : 'Shoot');
 }
 function onDetections(det, now) {
-  const m = updateMotion(det, now);
-  if (m.events || m.hit) G.lastAct = now;
-  if (G.paused || G.st === 'IDLE' || G.st === 'HANDOFF') return;
-  if (G.st === 'AIMING') {
-    if (m.hit) {
-      G.st = 'ROLLING'; G.shotAt = now; G.cueGone = 0; G.scratch = false;
-      hooks.sound('shot'); hooks.status('Shot! Waiting for the balls to stop');
+  if (updateMotion(det, now)) G.lastAct = now;
+  if (G.paused || G.st === 'IDLE') return;
+  if (G.st === 'CLOCK' || G.st === 'TIMEOUT') {
+    if (G.needSnap) {   // after an early start (hand in the pocket), wait for rolling balls to settle first
+      if (!G.snapWhenStill || now - G.lastAct >= cfg.stillMs) { snapshot(det); G.needSnap = false; }
+      return;
+    }
+    if (shotTaken(det, now)) {
+      G.st = 'ROLLING'; G.shotAt = now; G.lastAct = now; G.cueGone = 0; G.scratch = false;
+      hooks.sound('shot'); hooks.status('Waiting for the balls to stop');
     }
   } else if (G.st === 'ROLLING') {
     if (det.cue) G.cueGone = 0; else if (!G.cueGone) G.cueGone = now;
@@ -442,20 +468,22 @@ function onDetections(det, now) {
     const stopped = now - G.lastAct >= cfg.stillMs && now - G.shotAt > 1000;
     const pickup = G.scratch && det.pocketReach;              // someone reaching into a pocket for the cue ball
     if (stopped || pickup || now - G.shotAt > 25000) {
-      const p = nextPlayer() + 1;
-      passTurn(now, G.scratch ? `Scratch. Player ${p}: place the cue ball and shoot` : `Turn ${G.turn + 1}`);
+      startClock(now, G.scratch ? 'Scratch. Place the cue ball and shoot' : 'Shoot');
+      G.snapWhenStill = !stopped;
     }
   }
 }
 function timeCheck(now) {
-  if (G.st === 'AIMING' && !G.paused && now > G.tEnd + 300) {
-    G.st = 'HANDOFF'; G.handoffEnd = now + 1500;
-    hooks.sound('buzzer'); hooks.status(`Time! Player ${G.player + 1} loses the turn`);
-  } else if (G.st === 'HANDOFF' && now >= G.handoffEnd) passTurn(now);
+  if (G.st === 'CLOCK' && !G.paused && now > G.tEnd + 300) {
+    G.st = 'TIMEOUT'; G.timeoutEnd = now + 2000;
+    hooks.sound('buzzer'); hooks.status('Time! Next player');
+  } else if (G.st === 'TIMEOUT' && now >= G.timeoutEnd) {
+    const keep = rest; startClock(now, 'Shoot'); G.needSnap = false; rest = keep;   // nothing moved: keep the resting spots
+  }
 }
 
 if (typeof module !== 'undefined') module.exports = {
-  W, H, cfg, G, hooks, buildLut, warp, detect, updateMotion, onDetections, timeCheck, startTurn, homography, undistR,
+  W, H, cfg, G, hooks, buildLut, warp, detect, updateMotion, onDetections, timeCheck, startClock, pause, resume, homography, undistR,
   setSrc(w, h) { srcW = w; srcH = h; }, getLut: () => lut, warped, mask
 };
 
@@ -578,7 +606,7 @@ function initUI() {
     ctx.drawImage(wc, 0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!overlay || !det) return;
     const s = ctx.canvas.width / W;
-    ctx.lineWidth = Math.max(3, ctx.canvas.width / 300); ctx.font = '600 ' + Math.round(ctx.canvas.width / 28) + 'px system-ui, sans-serif';
+    ctx.lineWidth = 3; ctx.font = '600 22px system-ui, sans-serif';
     for (const b of det.balls) {
       ctx.strokeStyle = b.cue ? '#ffffff' : b.nearOcc ? '#94a69d' : '#f2b33d';
       ctx.beginPath(); ctx.arc(b.x * s, b.y * s, (det.d / 2) * Math.sqrt(b.n) * s + 3, 0, 2 * Math.PI); ctx.stroke();
@@ -586,7 +614,7 @@ function initUI() {
     }
     ctx.strokeStyle = '#ff5a47';
     for (const o of det.occl) ctx.strokeRect(o.minx * s, o.miny * s, o.bw * s, o.bh * s);
-    ctx.fillStyle = '#ffffff'; ctx.fillText('balls ' + det.count + (det.cue ? '' : ' · no cue ball'), 12, ctx.canvas.width / 22);
+    ctx.fillStyle = '#ffffff'; ctx.fillText('balls ' + det.count + (det.cue ? '' : ' · no cue ball'), 10, 28);
   }
   function drawRaw() {
     rctx.drawImage(proc, 0, 0);
@@ -640,7 +668,6 @@ function initUI() {
   bind('table', 'tableIn', () => { lut = null; });
   bind('k1', 'k1', () => { lut = null; });
   bind('hTol', 'hTol'); bind('tol', 'tol'); bind('shotSec', 'shotSec'); bind('stillMs', 'stillMs'); bind('delay', 'delay');
-  bind('players', 'players');
 
   // ---- game ----
   async function lockOn() { try { if ('wakeLock' in navigator) { wl = await navigator.wakeLock.request('screen'); } } catch (e) {} }
@@ -652,7 +679,7 @@ function initUI() {
     inGame = true; $('setup').hidden = true; $('game').hidden = false;
     lockOn();
     const fs = document.documentElement.requestFullscreen; if (fs) document.documentElement.requestFullscreen().catch(() => {});
-    G.st = 'IDLE'; G.paused = false; G.player = 0; G.turn = 1;
+    G.st = 'IDLE'; G.paused = false;
     countEnd = performance.now() + cfg.delay * 1000;
     hooks.status('Climb down. The clock starts on its own.');
   };
@@ -661,9 +688,8 @@ function initUI() {
     ctlTimer = setTimeout(() => { c.hidden = true; }, 8000);
   }
   $('face').addEventListener('click', () => { audioInit(); showCtl(); });
-  $('cPause').onclick = () => { const now = performance.now(); if (countEnd) { countEnd = 0; startTurn(now, 0); } else if (G.paused) resume(now); else pause(now); showCtl(); };
-  $('cNext').onclick = () => { if (G.st === 'IDLE' || countEnd) return; passTurn(performance.now()); showCtl(); };
-  $('cRestart').onclick = () => { if (G.st === 'IDLE' || countEnd) return; startTurn(performance.now(), G.player, `Turn ${G.turn} · clock restarted`); showCtl(); };
+  $('cPause').onclick = () => { const now = performance.now(); if (countEnd) { countEnd = 0; startClock(now); } else if (G.paused) resume(now); else pause(now); showCtl(); };
+  $('cRestart').onclick = () => { if (countEnd) return; startClock(performance.now(), 'Clock restarted'); showCtl(); };
   $('cFlip').onclick = () => { $('game').classList.toggle('flip'); showCtl(); };
   $('cMini').onclick = () => { mini.hidden = !mini.hidden; $('cMini').textContent = mini.hidden ? 'Show camera' : 'Hide camera'; showCtl(); };
   $('cSetup').onclick = () => {
@@ -676,16 +702,16 @@ function initUI() {
   function loop() {
     const now = performance.now();
     if (inGame) {
-      if (countEnd && now >= countEnd) { countEnd = 0; startTurn(now, 0); }
+      if (countEnd && now >= countEnd) { countEnd = 0; startClock(now); }
       if (G.st !== 'IDLE' && !G.paused && lastFrame && now - lastFrame > 1500) pause(now, true);
       if (G.auto && now - lastFrame < 500) resume(now);
       timeCheck(now);
       const t = $('gTimer'), nm = $('gName');
-      nm.textContent = 'Player ' + (G.player + 1);
+      nm.textContent = G.paused ? 'Paused' : G.st === 'CLOCK' ? 'Shoot' : G.st === 'ROLLING' ? 'Rolling' : G.st === 'TIMEOUT' ? 'Time' : '';
       t.classList.remove('small');
       if (countEnd) {
         t.textContent = Math.ceil((countEnd - now) / 1000); t.style.color = 'var(--mute)'; nm.textContent = 'Starting';
-      } else if (G.st === 'AIMING') {
+      } else if (G.st === 'CLOCK') {
         const rem = (G.paused ? G.rem : G.tEnd - now) / 1000, whole = Math.max(0, Math.ceil(rem));
         if (!G.paused && whole !== G.lastWhole && whole >= 1) {
           G.lastWhole = whole;
@@ -694,10 +720,8 @@ function initUI() {
         t.textContent = whole;
         t.style.color = G.paused ? 'var(--mute)' : rem > 5 ? 'var(--felt)' : rem > 3 ? 'var(--amber)' : 'var(--red)';
       } else {
-        t.classList.add('small');
-        t.textContent = G.st === 'ROLLING' ? 'Rolling' : G.st === 'HANDOFF' ? 'Time' : '—';
-        t.style.color = G.st === 'HANDOFF' ? 'var(--red)' : 'var(--mute)';
-        if (G.st === 'ROLLING') nm.textContent = 'Next: Player ' + (nextPlayer() + 1);
+        if (G.st === 'TIMEOUT') { t.textContent = '0'; t.style.color = 'var(--red)'; }
+        else { t.classList.add('small'); t.textContent = '· · ·'; t.style.color = 'var(--mute)'; }
       }
       $('cPause').textContent = countEnd ? 'Start now' : G.paused ? 'Resume' : 'Pause';
     }
