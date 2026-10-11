@@ -100,10 +100,10 @@ input[type=range]{width:100%;accent-color:var(--felt)}
     </div>
     <h3>Ball movement</h3>
     <div class="meter" aria-hidden="true"><div id="mBar"></div><i id="mStop"></i><i id="mStart"></i></div>
-    <p class="mute" id="mText">Roll a ball to see the bar move. Above the red line counts as a shot; the clock starts once it stays under the green line for the Stop time.</p>
+    <p class="mute" id="mText">With nothing moving the bar should sit at or near zero. Roll a ball and it jumps. Past the red line counts as a shot; the clock starts once it stays left of the green line for the Stop time.</p>
     <div class="sliders">
-      <span>Shot above</span><input type="range" id="startT" min="10" max="150" step="5"><output id="startTV"></output>
-      <span>Stopped below</span><input type="range" id="stopT" min="3" max="40" step="1"><output id="stopTV"></output>
+      <span>Shot above</span><input type="range" id="startT" min="50" max="300" step="10"><output id="startTV"></output>
+      <span>Stopped below</span><input type="range" id="stopT" min="10" max="100" step="5"><output id="stopTV"></output>
     </div>
     <div class="row">
       <button id="btnCorners">Redo corners</button>
@@ -150,17 +150,21 @@ input[type=range]{width:100%;accent-color:var(--felt)}
 'use strict';
 // ================= Core vision + game logic (no DOM; unit-testable) =================
 const W = 600, H = 300;                  // top-down working image, 2:1 like every pool table
-const DEF = {corners: null, k1: 0, tableIn: 88, felt: null, hTol: 20, tol: 1, shotSec: 10, stillMs: 1000, startT: 50, stopT: 12, voice: true, aspect: 0, camId: '', delay: 15};
+const DEF = {corners: null, k1: 0, tableIn: 88, felt: null, hTol: 20, tol: 1, shotSec: 10, stillMs: 1000, startT: 110, stopT: 30, voice: true, aspect: 0, camId: '', delay: 15};
 let cfg = JSON.parse(JSON.stringify(DEF));
 let srcW = 0, srcH = 0, lut = null, ballAreaEma = 0, tracks = [], primed = false;
 const N = W * H, GW = W / 10, GH = H / 10;
 const warped = new Uint8ClampedArray(N * 4), mask = new Uint8Array(N), satA = new Uint8Array(N), valA = new Uint8Array(N);
 const lab = new Int32Array(N), stk = new Int32Array(N), pocketMask = new Uint8Array(N), pocketNear = new Uint8Array(N), dt = new Uint16Array(N);
+const cellR = new Float32Array(GW * GH), cellG = new Float32Array(GW * GH), pcellR = new Float32Array(GW * GH), pcellG = new Float32Array(GW * GH), cellN = new Uint16Array(GW * GH), cellS = new Float32Array(GW * GH), pcellS = new Float32Array(GW * GH), pcellOk = new Uint8Array(GW * GH);
+const thinT = new Float64Array(GW * GH);
 const prevMask = new Uint8Array(N), crA = new Uint8Array(N), cgA = new Uint8Array(N), pcrA = new Uint8Array(N), pcgA = new Uint8Array(N), occT = new Float64Array(GW * GH), pocketId = new Int8Array(N), pocketBase = new Float64Array(6).fill(-1);
 const hooks = {sound() {}, status() {}};
-// Table motion, in ball-areas of change per frame: how many pixels changed colour since the last frame
-// (a rolling ball, even a faint motion-blur streak), not counting shadows or anywhere a person was in the last 0.4 s.
-const motion = {value: 0, noise: 0};
+// Table motion, in ball-areas per frame: the table is cut into 10x10 px patches and each patch's average colour
+// is compared with the last frame. Averaging 100 pixels smooths out camera noise; a ball or even a faint motion-blur
+// streak entering a patch still shifts its colour a lot. Shadows don't change colour, a lighting shift that hits the
+// whole table is subtracted, and anywhere a person was in the last 0.4 s is ignored.
+const motion = {value: 0, all: 0, noise: 0, smooth: 0, hist: []};
 let rest = [], prevCands = [], havePrev = false;
 
 function ballDiam() { return 2.25 / cfg.tableIn * W; }   // 2.25 in ball over playing length
@@ -205,8 +209,8 @@ function undistR(rd, k1) {
 }
 
 function resetTracking() {
-  ballAreaEma = 0; tracks = []; primed = false; occT.fill(0);
-  rest = []; prevCands = []; havePrev = false; motion.value = 0; motion.noise = 0;
+  ballAreaEma = 0; tracks = []; primed = false; occT.fill(0); thinT.fill(0);
+  rest = []; prevCands = []; havePrev = false; motion.value = motion.noise = motion.smooth = 0; motion.hist = [];
 }
 
 function buildLut() {
@@ -323,7 +327,7 @@ function detect() {
                 s: ss / area, v: sv / area, border, depth: dmax / 3, pn});
   }
   const d = ballDiam(), rad = d / 2, A1 = Math.PI * d * d / 4, Aref = ballAreaEma || A1;
-  const balls = [], occl = [];
+  const balls = [], occl = [], thinIds = [];
   let pocketReach = false;
   for (const c of comps) {
     if (c.area < 0.3 * Aref) continue;                                     // noise, chalk dust, spot sticker
@@ -332,7 +336,7 @@ function detect() {
     if ((c.border && c.area > 2.5 * Aref) || c.area > 10 * Aref || thick) { // arm, hand, body, cue stick held over the table
       occl.push(c); if (c.pn) pocketReach = true; continue;
     }
-    if (thin) { if (c.area > 1.5 * Aref) occl.push(c); continue; }        // a cue stick lying on the cloth
+    if (thin) { if (c.area > 1.5 * Aref) occl.push(c); else thinIds.push(c.id); continue; }   // cue stick, whole or in pieces
     if (c.area <= 1.6 * Aref && asp > 0.6 && asp < 1.67 && fill > 0.5) { c.n = 1; balls.push(c); continue; }
     if (c.area <= 8 * Aref && fill > 0.3) { c.n = Math.max(2, Math.round(c.area / Aref)); balls.push(c); continue; }
     occl.push(c); if (c.pn) pocketReach = true;
@@ -360,33 +364,67 @@ function detect() {
     else if (v - pocketBase[k] > 35) pocketReach = true;
     else if (Math.abs(v - pocketBase[k]) < 20) pocketBase[k] = 0.97 * pocketBase[k] + 0.03 * v;
   }
-  return {balls, occl, cue, count: balls.reduce((a, b) => a + b.n, 0), d, isOcc, pocketReach};
+  const isThin = new Uint8Array(nl + 1); for (const id of thinIds) isThin[id] = 1;
+  return {balls, occl, cue, count: balls.reduce((a, b) => a + b.n, 0), d, isOcc, isThin, pocketReach};
 }
 
 // `events` = something on the table moved this frame; used to decide that every ball has stopped.
 function updateMotion(det, now) {
   const d = det.d;
-  if (det.occl.length) {
-    for (let i = 0; i < N; i++) {
-      const l = lab[i];
-      if (l && det.isOcc[l]) { const x = i % W, y = (i - x) / W; occT[((y / 10) | 0) * GW + ((x / 10) | 0)] = now; }
+  for (let i = 0; i < N; i++) {
+    const l = lab[i];
+    if (l && (det.isOcc[l] || det.isThin[l])) {
+      const x = i % W, y = (i - x) / W, c = ((y / 10) | 0) * GW + ((x / 10) | 0);
+      if (det.isOcc[l]) occT[c] = now; else thinT[c] = now;
     }
   }
   {
-    const zone = new Uint8Array(GW * GH);                       // cells near a person, now or just before
-    for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) if (now - occT[j * GW + i] < 400)
-      for (let b = Math.max(0, j - 2); b <= Math.min(GH - 1, j + 2); b++) for (let a = Math.max(0, i - 2); a <= Math.min(GW - 1, i + 2); a++) zone[b * GW + a] = 1;
-    let changed = 0;
-    if (havePrev) for (let i = 0; i < N; i++) {
-      const dc = Math.abs(crA[i] - pcrA[i]) + Math.abs(cgA[i] - pcgA[i]);
-      if (dc > 12 || mask[i] !== prevMask[i]) {
-        const x = i % W, y = (i - x) / W;
-        if (!zone[((y / 10) | 0) * GW + ((x / 10) | 0)]) changed++;
+    // zone: near a person (1), or near a person or a piece of cue stick (2), now or in the last 0.4 s
+    const zone = new Uint8Array(GW * GH);
+    for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) {
+      const k = now - occT[j * GW + i] < 400 ? 1 : now - thinT[j * GW + i] < 400 ? 2 : 0;
+      if (k) for (let b = Math.max(0, j - 2); b <= Math.min(GH - 1, j + 2); b++) for (let a = Math.max(0, i - 2); a <= Math.min(GW - 1, i + 2); a++)
+        zone[b * GW + a] = zone[b * GW + a] === 1 ? 1 : k;
+    }
+    let changedCells = 0, changedAll = 0;
+    cellR.fill(0); cellG.fill(0); cellS.fill(0); cellN.fill(0);
+    for (let i = 0; i < N; i++) {
+      const o = i << 2; if (!warped[o + 3]) continue;
+      const x = i % W, y = (i - x) / W, c = ((y / 10) | 0) * GW + ((x / 10) | 0);
+      cellR[c] += warped[o]; cellG[c] += warped[o + 1]; cellS[c] += warped[o] + warped[o + 1] + warped[o + 2]; cellN[c]++;
+    }
+    // A patch's colour is its summed red (green) over its summed brightness, so dark pixels count for little.
+    // Patches darker than a dim cloth (pocket holes) are too noisy to judge and are skipped.
+    const ok = c => cellN[c] > 50 && cellS[c] / cellN[c] > 60;
+    let mr = 0, mg = 0, n = 0;
+    for (let c = 0; c < GW * GH; c++) {
+      if (cellS[c] > 0) { cellR[c] = 255 * cellR[c] / cellS[c]; cellG[c] = 255 * cellG[c] / cellS[c]; }
+      if (havePrev && ok(c) && pcellOk[c]) { mr += cellR[c] - pcellR[c]; mg += cellG[c] - pcellG[c]; n++; }
+    }
+    if (havePrev && n) {
+      mr /= n; mg /= n;
+      const dcs = [];
+      for (let c = 0; c < GW * GH; c++) if (ok(c) && pcellOk[c]) dcs.push(Math.abs(cellR[c] - pcellR[c] - mr) + Math.abs(cellG[c] - pcellG[c] - mg));
+      // The typical patch on a still table shows the camera's noise level; a change has to stand well above it.
+      const thr = Math.max(6, 5 * median(dcs));
+      const bs = []; for (let c = 0; c < GW * GH; c++) if (ok(c)) bs.push(cellS[c] / cellN[c]);
+      const medB = median(bs);                                  // brightness of the typical patch (lit cloth)
+      for (let c = 0; c < GW * GH; c++) if (ok(c) && pcellOk[c] && zone[c] !== 1) {
+        const dc = Math.abs(cellR[c] - pcellR[c] - mr) + Math.abs(cellG[c] - pcellG[c] - mg);
+        // A shadow sweeping over a patch changes its brightness a lot and its colour a little; a ball changes the
+        // colour a lot. So a patch that got much darker or brighter needs a much bigger colour change to count.
+        const ratio = (cellS[c] / cellN[c]) / (pcellS[c] || 1);
+        // Darker patches (in someone's shadow) give a noisier colour, so they need proportionally more change.
+        const need = thr * Math.max(1, medB / (cellS[c] / cellN[c])) * (ratio < 0.8 || ratio > 1.25 ? 3 : 1);
+        if (dc > need) { changedAll++; if (!zone[c]) changedCells++; }
       }
     }
-    prevMask.set(mask); pcrA.set(crA); pcgA.set(cgA); havePrev = true;
+    pcellR.set(cellR); pcellG.set(cellG); for (let c = 0; c < GW * GH; c++) { pcellOk[c] = ok(c) ? 1 : 0; pcellS[c] = cellN[c] ? cellS[c] / cellN[c] : 0; } havePrev = true;
     const A1 = Math.PI * d * d / 4;
-    motion.value = changed / (ballAreaEma || A1);
+    motion.value = changedCells * 100 / (ballAreaEma || A1);          // for spotting a shot: ignores the cue stick too
+    motion.all = changedAll * 100 / (ballAreaEma || A1);              // for spotting that the balls stopped
+    motion.hist.push(motion.all); if (motion.hist.length > 6) motion.hist.shift();
+    motion.smooth = motion.hist.reduce((a, b) => a + b, 0) / motion.hist.length;   // last ~0.3 s, so one flicker can't hold the clock
   }
   const recentOcc = (x, y) => {
     const cx = (x / 10) | 0, cy = (y / 10) | 0;
@@ -486,7 +524,7 @@ const startLevel = () => motion.noise + cfg.startT / 100, stopLevel = () => moti
 function onDetections(det, now) {
   if (updateMotion(det, now)) G.lastAct = now;
   const mv = motion.value;
-  if (mv > stopLevel()) G.lastMove = now;
+  if (motion.smooth > stopLevel()) G.lastMove = now;
   G.hot = mv > startLevel() ? G.hot + 1 : 0;
   if (G.paused || G.st === 'IDLE') return;
   if (G.st === 'CLOCK' || G.st === 'TIMEOUT') {
@@ -494,7 +532,7 @@ function onDetections(det, now) {
       if (!G.snapWhenStill || now - Math.max(G.lastAct, G.lastMove) >= cfg.stillMs) { snapshot(det); G.needSnap = false; G.hot = 0; }
       return;
     }
-    if (mv < startLevel()) motion.noise = 0.95 * motion.noise + 0.05 * Math.min(mv, 0.3);   // learn the camera's flicker
+    if (mv < startLevel()) motion.noise = 0.98 * motion.noise + 0.02 * Math.min(motion.smooth, 1);   // learn the camera's flicker
     if (shotTaken(det, now) || G.hot >= 2) {
       G.st = 'ROLLING'; G.shotAt = now; G.lastAct = now; G.lastMove = now; G.cueGone = 0; G.reachN = 0; G.scratch = false;
       hooks.sound('shot'); hooks.status('Waiting for the balls to stop');
@@ -524,7 +562,7 @@ function timeCheck(now) {
 
 if (typeof module !== 'undefined') module.exports = {
   W, H, cfg, G, hooks, buildLut, warp, detect, updateMotion, onDetections, timeCheck, startClock, pause, resume, homography, undistR,
-  setSrc(w, h) { srcW = w; srcH = h; }, getLut: () => lut, warped, mask, motion
+  setSrc(w, h) { srcW = w; srcH = h; }, getLut: () => lut, warped, mask, motion, G
 };
 
 // ================= Phone UI: camera in, shot clock out =================
@@ -664,9 +702,9 @@ function initUI() {
     else if (!mini.hidden) drawWarped(mctx, det, true, false);
   }
   function drawMeter() {
-    const full = 2;                                   // the bar spans 0 to 2 ball-areas of change per frame
+    const full = 4;                                   // the bar spans 0 to 4 ball-areas of change per frame
     const pct = v => Math.min(100, Math.max(0, v / full * 100)) + '%';
-    $('mBar').style.width = pct(motion.value);
+    $('mBar').style.width = pct(motion.all);
     $('mStop').style.left = pct(motion.noise + cfg.stopT / 100);
     $('mStart').style.left = pct(motion.noise + cfg.startT / 100);
   }
