@@ -440,13 +440,19 @@ function updateMotion(det, now) {
   }
   pairs.sort((p, q) => p[0] - q[0]);
   const da = new Uint8Array(dets.length), ta = new Uint8Array(tracks.length);
-  let events = 0;
+  let events = 0, creeping = false;
   for (const [step, a, t] of pairs) {
     if (da[a] || ta[t]) continue;
     da[a] = ta[t] = 1;
     const tr = tracks[t], b = dets[a];
     tr.x = b.x; tr.y = b.y; tr.seen = now;
     if (Math.hypot(b.x - tr.ax, b.y - tr.ay) > 0.35 * d) { events++; tr.ax = b.x; tr.ay = b.y; }
+    // Slow creep: where was this ball half a second ago? A still ball's centre wobbles far less than 1/6 of a ball.
+    if (b.n === 1) {
+      tr.hist = (tr.hist || []).filter(h => now - h.t <= 600); tr.hist.push({t: now, x: b.x, y: b.y});
+      const old = tr.hist[0];
+      if (now - old.t >= 400 && Math.hypot(b.x - old.x, b.y - old.y) > 0.15 * d) creeping = true;
+    } else tr.hist = [];
   }
   for (let a = 0; a < dets.length; a++) if (!da[a]) {
     const b = dets[a];
@@ -455,8 +461,8 @@ function updateMotion(det, now) {
   }
   tracks = tracks.filter(t => now - t.seen < 3000);
   primed = true;
-
-  return events;
+  motion.creeping = creeping;
+  return events + (creeping ? 1 : 0);
 }
 
 // ---- Shot detection while the clock runs ----
@@ -501,23 +507,26 @@ function shotTaken(det, now) {
 }
 
 const G = {st: 'IDLE', tEnd: 0, rem: 0, paused: false, auto: false, lastAct: 0, shotAt: 0, timeoutEnd: 0,
-           cueGone: 0, scratch: false, lastWhole: 99, needSnap: false, snapWhenStill: false, lastMove: 0, hot: 0, reachN: 0};
+           cueGone: 0, scratch: false, lastWhole: 99, needSnap: false, snapWhenStill: false, lastMove: 0, hot: 0, reachN: 0, lastTick: 0, holding: false};
 
+// The clock is driven by the camera: each frame it first checks the table, and only takes time off
+// when every ball is still. Any movement (even too little to count as a shot) holds it where it is,
+// and no frames (camera stalled) means no time comes off either.
 function startClock(now, msg) {
-  G.st = 'CLOCK'; G.tEnd = now + cfg.shotSec * 1000; G.lastWhole = 99; G.paused = false; G.needSnap = true; G.snapWhenStill = false;
+  G.st = 'CLOCK'; G.rem = cfg.shotSec * 1000; G.lastTick = 0; G.holding = false;
+  G.lastWhole = 99; G.paused = false; G.needSnap = true; G.snapWhenStill = false;
   hooks.status(msg || 'Shoot');
   hooks.sound('start');
 }
 function pause(now, auto) {
   if (G.st === 'IDLE' || G.paused) return;
   G.paused = true; G.auto = !!auto;
-  if (G.st === 'CLOCK') G.rem = G.tEnd - now;
   hooks.status(auto ? 'Camera stalled. Paused.' : 'Paused');
 }
 function resume(now) {
   if (!G.paused) return;
-  G.paused = false; G.auto = false; G.lastAct = now;
-  if (G.st === 'CLOCK') { G.tEnd = now + G.rem; G.needSnap = true; }
+  G.paused = false; G.auto = false; G.lastAct = now; G.lastTick = 0;
+  if (G.st === 'CLOCK') G.needSnap = true;
   hooks.status(G.st === 'ROLLING' ? 'Waiting for the balls to stop' : 'Shoot');
 }
 const startLevel = () => motion.noise + cfg.startT / 100, stopLevel = () => motion.noise + cfg.stopT / 100;
@@ -533,7 +542,19 @@ function onDetections(det, now) {
       return;
     }
     if (mv < startLevel()) motion.noise = 0.98 * motion.noise + 0.02 * Math.min(motion.smooth, 1);   // learn the camera's flicker
-    if (shotTaken(det, now) || G.hot >= 2) {
+    const shot = shotTaken(det, now) || G.hot >= 2;
+    if (G.st === 'CLOCK' && !shot) {
+      const moving = motion.smooth > stopLevel() || now - G.lastAct < 150;   // anything rolling right now?
+      const dt = G.lastTick ? Math.min(250, now - G.lastTick) : 0;
+      G.lastTick = now;
+      if (G.holding !== moving) { G.holding = moving; hooks.status(moving ? 'Balls moving, clock held' : 'Shoot'); }
+      if (!moving) G.rem -= dt;
+      if (G.rem <= 0) {
+        G.rem = 0; G.st = 'TIMEOUT'; G.timeoutEnd = now + 2000;
+        hooks.sound('buzzer'); hooks.status('Time! Next player');
+      }
+    }
+    if (shot) {
       G.st = 'ROLLING'; G.shotAt = now; G.lastAct = now; G.lastMove = now; G.cueGone = 0; G.reachN = 0; G.scratch = false;
       hooks.sound('shot'); hooks.status('Waiting for the balls to stop');
     }
@@ -552,10 +573,7 @@ function onDetections(det, now) {
   }
 }
 function timeCheck(now) {
-  if (G.st === 'CLOCK' && !G.paused && now > G.tEnd + 300) {
-    G.st = 'TIMEOUT'; G.timeoutEnd = now + 2000;
-    hooks.sound('buzzer'); hooks.status('Time! Next player');
-  } else if (G.st === 'TIMEOUT' && now >= G.timeoutEnd) {
+  if (G.st === 'TIMEOUT' && now >= G.timeoutEnd) {
     const keep = rest; startClock(now, 'Shoot'); G.needSnap = false; rest = keep;   // nothing moved: keep the resting spots
   }
 }
@@ -822,19 +840,19 @@ function initUI() {
       if (G.auto && now - lastFrame < 500) resume(now);
       timeCheck(now);
       const t = $('gTimer'), nm = $('gName');
-      nm.textContent = G.paused ? 'Paused' : G.st === 'CLOCK' ? 'Shoot' : G.st === 'ROLLING' ? 'Rolling' : G.st === 'TIMEOUT' ? 'Time' : '';
+      nm.textContent = G.paused ? 'Paused' : G.st === 'CLOCK' ? (G.holding ? 'Held' : 'Shoot') : G.st === 'ROLLING' ? 'Rolling' : G.st === 'TIMEOUT' ? 'Time' : '';
       t.classList.remove('small');
       if (countEnd) {
         t.textContent = Math.ceil((countEnd - now) / 1000); t.style.color = 'var(--mute)'; nm.textContent = 'Starting';
       } else if (G.st === 'CLOCK') {
-        const rem = (G.paused ? G.rem : G.tEnd - now) / 1000, whole = Math.max(0, Math.ceil(rem));
-        if (!G.paused && whole !== G.lastWhole && whole >= 1) {
+        const rem = G.rem / 1000, whole = Math.max(0, Math.ceil(rem));
+        if (!G.paused && !G.holding && whole !== G.lastWhole && whole >= 1) {
           G.lastWhole = whole;
           if (voiceOn()) say(WORDS[whole] || String(whole));
           else if (whole <= 3) hooks.sound('warn'); else if (whole <= 5) hooks.sound('tick');
         }
         t.textContent = whole;
-        t.style.color = G.paused ? 'var(--mute)' : rem > 5 ? 'var(--felt)' : rem > 3 ? 'var(--amber)' : 'var(--red)';
+        t.style.color = G.paused || G.holding ? 'var(--mute)' : rem > 5 ? 'var(--felt)' : rem > 3 ? 'var(--amber)' : 'var(--red)';
       } else {
         if (G.st === 'TIMEOUT') { t.textContent = '0'; t.style.color = 'var(--red)'; }
         else { t.classList.add('small'); t.textContent = '· · ·'; t.style.color = 'var(--mute)'; }
