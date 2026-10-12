@@ -10,6 +10,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<!-- Runs the trained ball detector (model.onnx, kept next to this page) on the phone. -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
 <style>
 /* Layout: setup scrolls as one column; the game is a full-screen shot clock read from about 5 ft below the phone */
 :root{
@@ -88,7 +90,8 @@ input[type=range]{width:100%;accent-color:var(--felt)}
     <h2>Calibrate</h2>
     <p id="calMsg" class="step"></p>
     <canvas id="raw"></canvas>
-    <h3>Top-down check · magenta = not felt</h3>
+    <p id="mlStatus" class="mute">Ball model: loading…</p>
+    <h3>Top-down check · magenta = not felt, boxes = model</h3>
     <canvas id="prev"></canvas>
     <div class="sliders">
       <span>Table</span><select id="table"><option value="78">7 ft</option><option value="88">8 ft</option><option value="100">9 ft</option></select><span></span>
@@ -128,6 +131,7 @@ input[type=range]{width:100%;accent-color:var(--felt)}
     <p class="mute">The delay gives you time to climb down. On iPhone, turn the ringer switch on or the clock is silent.</p>
     <button id="btnStart" class="primary big">Start game</button>
   </section>
+  <p class="mute" style="font-size:12px">Ball model trained on <a href="https://universe.roboflow.com/leonardo-wijaya-bdcih/pool-ball-v4/dataset/4" style="color:inherit">Pool Ball V4</a> by leonardo-wijaya-bdcih (Roboflow Universe), CC BY 4.0.</p>
 </main>
 
 <div id="game" hidden>
@@ -166,6 +170,11 @@ const hooks = {sound() {}, status() {}};
 // whole table is subtracted, and anywhere a person was in the last 0.4 s is ignored.
 const motion = {value: 0, all: 0, noise: 0, smooth: 0, hist: []};
 let rest = [], prevCands = [], havePrev = false;
+// Trained ball detector (optional). Its results arrive a few times a second, a little after the frame they came from.
+// dets: [{x, y, w, h, cls (0 ball, 1 cue ball), score}] in top-down table pixels; frameT: when that frame was taken.
+const ml = {dets: [], frameT: 0, on: false};
+function setML(dets, frameT) { ml.dets = dets; ml.frameT = frameT; ml.on = true; }
+const mlFresh = now => ml.on && now - ml.frameT < 1500;
 
 function ballDiam() { return 2.25 / cfg.tableIn * W; }   // 2.25 in ball over playing length
 
@@ -507,13 +516,13 @@ function shotTaken(det, now) {
 }
 
 const G = {st: 'IDLE', tEnd: 0, rem: 0, paused: false, auto: false, lastAct: 0, shotAt: 0, timeoutEnd: 0,
-           cueGone: 0, scratch: false, lastWhole: 99, needSnap: false, snapWhenStill: false, lastMove: 0, hot: 0, reachN: 0, lastTick: 0, holding: false};
+           cueGone: 0, scratch: false, lastWhole: 99, needSnap: false, snapWhenStill: false, lastMove: 0, hot: 0, reachN: 0, lastTick: 0, holding: false, clockT: 0, mlSnapped: false};
 
 // The clock is driven by the camera: each frame it first checks the table, and only takes time off
 // when every ball is still. Any movement (even too little to count as a shot) holds it where it is,
 // and no frames (camera stalled) means no time comes off either.
 function startClock(now, msg) {
-  G.st = 'CLOCK'; G.rem = cfg.shotSec * 1000; G.lastTick = 0; G.holding = false;
+  G.st = 'CLOCK'; G.rem = cfg.shotSec * 1000; G.lastTick = 0; G.holding = false; G.clockT = now; G.mlSnapped = false;
   G.lastWhole = 99; G.paused = false; G.needSnap = true; G.snapWhenStill = false;
   hooks.status(msg || 'Shoot');
   hooks.sound('start');
@@ -542,10 +551,17 @@ function onDetections(det, now) {
       return;
     }
     if (mv < startLevel()) motion.noise = 0.98 * motion.noise + 0.02 * Math.min(motion.smooth, 1);   // learn the camera's flicker
+    // As soon as the detector has looked at the table after the clock started (balls still), use its ball positions
+    // as the resting spots: it doesn't mistake an arm, a shadow or a cue stick for a ball.
+    if (!G.mlSnapped && ml.on && ml.frameT >= G.clockT && now - ml.frameT < 1500) {
+      G.mlSnapped = true;
+      const fromML = ml.dets.map(b => ({x: b.x, y: b.y, miss: 0, cov: false}));
+      if (fromML.length) rest = fromML;
+    }
     const shot = shotTaken(det, now) || G.hot >= 2;
     if (G.st === 'CLOCK' && !shot) {
       const moving = motion.smooth > stopLevel() || now - G.lastAct < 150;   // anything rolling right now?
-      const dt = G.lastTick ? Math.min(250, now - G.lastTick) : 0;
+      const dt = G.lastTick ? Math.min(600, now - G.lastTick) : 0;   // a slow frame still counts; a frozen camera pauses the game
       G.lastTick = now;
       if (G.holding !== moving) { G.holding = moving; hooks.status(moving ? 'Balls moving, clock held' : 'Shoot'); }
       if (!moving) G.rem -= dt;
@@ -559,7 +575,8 @@ function onDetections(det, now) {
       hooks.sound('shot'); hooks.status('Waiting for the balls to stop');
     }
   } else if (G.st === 'ROLLING') {
-    if (det.cue) G.cueGone = 0; else if (!G.cueGone) G.cueGone = now;
+    const cueSeen = mlFresh(now) && ml.frameT > G.shotAt ? ml.dets.some(b => b.cls === 1) : !!det.cue;
+    if (cueSeen) G.cueGone = 0; else if (!G.cueGone) G.cueGone = now;
     // A fast cue ball smears and can vanish for a moment, so only call it a scratch after 1.5 s without it,
     // and only count a reach into a pocket that lasts 0.3 s (a hand, not a ball rolling past the hole).
     G.scratch = !!G.cueGone && now - G.cueGone > 1500;
@@ -579,7 +596,7 @@ function timeCheck(now) {
 }
 
 if (typeof module !== 'undefined') module.exports = {
-  W, H, cfg, G, hooks, buildLut, warp, detect, updateMotion, onDetections, timeCheck, startClock, pause, resume, homography, undistR,
+  W, H, cfg, G, hooks, buildLut, warp, detect, updateMotion, setML, ml, onDetections, timeCheck, startClock, pause, resume, homography, undistR,
   setSrc(w, h) { srcW = w; srcH = h; }, getLut: () => lut, warped, mask, motion, G
 };
 
@@ -716,6 +733,7 @@ function initUI() {
     warp(pctx.getImageData(0, 0, w, h).data);
     const det = cfg.felt ? detect() : null;
     if (det) { onDetections(det, now); lastCount = det.count; }
+    mlRun(now);
     if (!inGame) { drawWarped(prctx, det, true, $('showMask').checked); drawMeter(); }
     else if (!mini.hidden) drawWarped(mctx, det, true, false);
   }
@@ -743,6 +761,10 @@ function initUI() {
     }
     ctx.strokeStyle = '#ff5a47';
     for (const o of det.occl) ctx.strokeRect(o.minx * s, o.miny * s, o.bw * s, o.bh * s);
+    if (ml.on) for (const b of ml.dets) {                                   // what the trained model sees
+      ctx.strokeStyle = b.cls === 1 ? '#ffffff' : '#7fb8e8';
+      ctx.strokeRect((b.x - b.w / 2) * s, (b.y - b.h / 2) * s, b.w * s, b.h * s);
+    }
     ctx.fillStyle = '#ffffff'; ctx.fillText('balls ' + det.count + (det.cue ? '' : ' · no cue ball'), 10, 28);
   }
   function drawRaw() {
@@ -756,6 +778,69 @@ function initUI() {
     rctx.stroke();
     pts.forEach((p, i) => { const x = p[0] * srcW, y = p[1] * srcH; rctx.beginPath(); rctx.arc(x, y, Math.max(srcW, srcH) / 70, 0, 7); rctx.fill(); rctx.fillText(String(i + 1), x + 10, y - 10); });
   }
+
+  // ---- trained ball detector ----
+  // Looks at the top-down table image a few times a second; the camera-based movement checks keep running every frame.
+  const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+  // The training photos were stretched to squares, so balls in them are ovals. Stretching the 2:1 table into a
+  // square the same way shows the model what it learned from; boxes are scaled back to the table afterwards.
+  const MW = 416, MH = 416;
+  const mlc = document.createElement('canvas'); mlc.width = MW; mlc.height = MH;
+  const mlx = mlc.getContext('2d', {willReadFrequently: true});
+  const ML = {session: null, busy: false, last: 0, ms: 0, inName: '', outName: ''};
+  function mlStatus(t) { $('mlStatus').textContent = 'Ball model: ' + t; }
+  async function mlInit() {
+    if (!window.ort) { mlStatus('off (the model engine could not load; using colour detection)'); return; }
+    try {
+      ort.env.wasm.wasmPaths = ORT_BASE;
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.proxy = true;            // run the model on a background thread so camera frames keep flowing
+      const res = await fetch('model.onnx');
+      if (!res.ok) throw new Error('model.onnx is not next to this page');
+      ML.session = await ort.InferenceSession.create(await res.arrayBuffer(), {executionProviders: ['wasm'], graphOptimizationLevel: 'all'});
+      ML.inName = ML.session.inputNames[0]; ML.outName = ML.session.outputNames[0];
+      mlStatus('ready');
+    } catch (e) { ML.session = null; mlStatus('off (' + (e && e.message || e) + '); using colour detection'); }
+  }
+  function nms(boxes, iou) {
+    boxes.sort((a, b) => b.score - a.score);
+    const keep = [];
+    for (const b of boxes) {
+      let ok = true;
+      for (const k of keep) {
+        const ix = Math.max(0, Math.min(b.x + b.w / 2, k.x + k.w / 2) - Math.max(b.x - b.w / 2, k.x - k.w / 2));
+        const iy = Math.max(0, Math.min(b.y + b.h / 2, k.y + k.h / 2) - Math.max(b.y - b.h / 2, k.y - k.h / 2));
+        const inter = ix * iy, uni = b.w * b.h + k.w * k.h - inter;
+        if (uni > 0 && inter / uni > iou) { ok = false; break; }
+      }
+      if (ok) keep.push(b);
+    }
+    return keep;
+  }
+  async function mlRun(frameT) {
+    if (!ML.session || ML.busy || frameT - ML.last < 250) return;
+    ML.busy = true; ML.last = frameT;
+    try {
+      wimg.data.set(warped); wctx.putImageData(wimg, 0, 0);
+      mlx.drawImage(wc, 0, 0, MW, MH);
+      const px = mlx.getImageData(0, 0, MW, MH).data, P = MW * MH;
+      const mlIn = new Float32Array(3 * P);   // fresh each look: the background thread takes ownership of it
+      for (let i = 0; i < P; i++) { mlIn[i] = px[i * 4] / 255; mlIn[P + i] = px[i * 4 + 1] / 255; mlIn[2 * P + i] = px[i * 4 + 2] / 255; }
+      const t0 = performance.now();
+      const out = (await ML.session.run({[ML.inName]: new ort.Tensor('float32', mlIn, [1, 3, MH, MW])}))[ML.outName];
+      ML.ms = ML.ms ? 0.8 * ML.ms + 0.2 * (performance.now() - t0) : performance.now() - t0;
+      const d = out.data, A = out.dims[2], sx = W / MW, sy = H / MH, boxes = [];
+      for (let a = 0; a < A; a++) {
+        const s0 = d[4 * A + a], s1 = d[5 * A + a], sc = Math.max(s0, s1);
+        if (sc < 0.35) continue;
+        boxes.push({x: d[a] * sx, y: d[A + a] * sy, w: d[2 * A + a] * sx, h: d[3 * A + a] * sy, cls: s1 > s0 ? 1 : 0, score: sc});
+      }
+      setML(nms(boxes, 0.45), frameT);
+      mlStatus(`ready · ${ml.dets.length} balls${ml.dets.some(b => b.cls === 1) ? ' incl. cue ball' : ''} · ${Math.round(ML.ms)} ms per look`);
+    } catch (e) { mlStatus('error (' + (e && e.message || e) + ')'); }
+    ML.busy = false;
+  }
+  mlInit();
 
   // ---- calibration ----
   function calMsgUpdate() {
@@ -862,7 +947,7 @@ function initUI() {
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
-  window.__sp = {video, get lastCount() { return lastCount; }};
+  window.__sp = {video, get lastCount() { return lastCount; }, ML, mlRun};
 }
 
 if (typeof window !== 'undefined' && window.document) initUI();
